@@ -1,0 +1,233 @@
+// The exact field names we ask the LLM for. This list is the contract:
+// the prompt asks for these, validation enforces these, and the Deals
+// tab has a column for each. Change it in one place, not three.
+const DEAL_FIELDS = [
+  'company_name', 'founder_name', 'founder_email',
+  'stage', 'sector', 'revenue', 'traction', 'ask', 'one_line'
+];
+
+// Attachment types we know how to read.
+const DECK_TYPES = ['application/pdf', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'];
+
+// Looks through an email's attachments and returns the first deck it finds.
+// Returns null if there isn't one — that's a normal case, not an error.
+function findDeckAttachment(message) {
+  const attachments = message.getAttachments();
+
+  for (let i = 0; i < attachments.length; i++) {
+    const type = attachments[i].getContentType();
+    const name = attachments[i].getName().toLowerCase();
+
+    // Check the declared type, but also the filename, because some
+    // mail clients send PDFs as 'application/octet-stream'.
+    const looksRight = DECK_TYPES.indexOf(type) !== -1 ||
+                       name.endsWith('.pdf') ||
+                       name.endsWith('.pptx') ||
+                       name.endsWith('.ppt');
+
+    if (looksRight) return attachments[i];
+  }
+  return null;
+}
+// Gemini reads PDF directly. PowerPoint it can't, so we route .pptx
+// through Drive: upload as a Google Slides file, export as PDF, delete
+// the temporary file. Costs a few seconds; avoids a text-extraction library.
+function toPdfBlob(blob) {
+  const type = blob.getContentType();
+  const name = blob.getName().toLowerCase();
+
+  if (type === 'application/pdf' || name.endsWith('.pdf')) {
+    return blob;   // already fine
+  }
+
+  let tempId = null;
+  try {
+    // Drive.Files.create with a Slides mimeType tells Drive to convert.
+    const created = Drive.Files.create(
+      { name: 'temp-convert-' + Date.now(),
+        mimeType: 'application/vnd.google-apps.presentation' },
+      blob
+    );
+    tempId = created.id;
+
+    // getAs() re-exports the Slides file in the format we ask for.
+    return DriveApp.getFileById(tempId).getAs('application/pdf');
+
+  } finally {
+    // 'finally' runs whether or not the code above succeeded, so the
+    // temp file gets cleaned up even when conversion throws.
+    if (tempId) {
+      try { DriveApp.getFileById(tempId).setTrashed(true); } catch (e) {}
+    }
+  }
+}
+// Reads the sector column from Sector_Owners so the model can only pick
+// from sectors that actually have an owner. This is the fix for routing:
+// instead of the model inventing 'FinTech' and us guessing where that maps,
+// it must choose from your list or say 'Other'.
+function getCanonicalSectors() {
+  const rows = readRows(CONFIG.TAB_OWNERS);
+  const sectors = [];
+  for (let i = 0; i < rows.length; i++) {
+    const s = String(rows[i].sector || '').trim();
+    if (s) sectors.push(s);
+  }
+  if (sectors.indexOf('Other') === -1) sectors.push('Other');
+  return sectors;
+}
+
+function buildPrompt(emailText, sectors, hasDeck) {
+  const sourceNote = hasDeck
+    ? 'You have a pitch deck (attached PDF) and the email body below. '
+      + 'The deck is the primary source; use the email to fill gaps.'
+    : 'There is NO deck. The email body below is your only source. '
+      + 'Extract whatever is stated there and return null for the rest.';
+
+  return [
+    'You are extracting structured data from a startup pitch for a VC firm.',
+    sourceNote,
+    '',
+    'Return ONLY a JSON object with exactly these keys:',
+    DEAL_FIELDS.join(', '),
+    '',
+    'RULES — these matter more than completeness:',
+    '- If a field is not stated, return null for it.',
+    '- Never infer, estimate, or guess a number. A missing revenue figure',
+    '  must be null, not "early stage" and not "0".',
+    '- revenue: copy the figure as written, with its period (e.g. "18 Cr FY25").',
+    '- stage: one of Pre-seed, Seed, Series A, Series B, Later, or null.',
+    '- sector: choose exactly one of: ' + sectors.join(' | '),
+    '  Pick the closest fit; only use "Other" if genuinely none apply.',
+    '- traction: one short sentence of the strongest concrete metric.',
+    '- ask: the amount they are raising, as written, or null.',
+    '- one_line: a single sentence describing what the company does.',
+    '',
+    'EMAIL BODY:',
+    // 8000 chars, up from 2000 — the body may now be the whole pitch.
+    (emailText || '').slice(0, 8000)
+  ].join('\n');
+}
+
+// Calls Gemini with the PDF attached. Retries on rate limits and server
+// errors, which are the two failures you will actually hit.
+function callGemini(pdfBlob, emailText) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('LLM_API_KEY missing from Script Properties.');
+
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/'
+            + CONFIG.MODEL + ':generateContent?key=' + apiKey;
+
+  // Build the parts list. The deck is optional — text-only is a
+  // legitimate request, not a degraded one.
+  const parts = [];
+  if (pdfBlob) {
+    parts.push({ inline_data: {
+      mime_type: 'application/pdf',
+      data: Utilities.base64Encode(pdfBlob.getBytes())
+    }});
+  }
+  parts.push({ text: buildPrompt(emailText, getCanonicalSectors(), !!pdfBlob) });
+
+  const payload = {
+    contents: [{ parts: parts }],
+    generationConfig: { response_mime_type: 'application/json' }
+  };
+
+  // Try up to 3 times, waiting longer each time.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    const code = response.getResponseCode();
+
+    if (code === 200) {
+      const body = JSON.parse(response.getContentText());
+      const text = body.candidates[0].content.parts[0].text;
+      return JSON.parse(text);
+    }
+
+    // 429 = rate limited, 5xx = Google's problem. Both worth retrying.
+    if (code === 429 || code >= 500) {
+      Utilities.sleep(2000 * attempt);
+      continue;
+    }
+
+    // 400/403 = our mistake. Retrying won't help; fail loudly.
+    throw new Error('Gemini ' + code + ': ' + response.getContentText().slice(0, 300));
+  }
+
+  throw new Error('Gemini unreachable after 3 attempts.');
+}
+// Turns whatever the model returned into exactly the shape we expect.
+// Every DEAL_FIELDS key present, every absent value as 'not stated'.
+function validateDeal(raw) {
+  const clean = {};
+
+  for (let i = 0; i < DEAL_FIELDS.length; i++) {
+    const key = DEAL_FIELDS[i];
+    let v = raw ? raw[key] : null;
+
+    if (v === null || v === undefined) {
+      v = 'not stated';
+    } else {
+      v = String(v).trim();
+      // Models sometimes emit these as literal strings.
+      const lower = v.toLowerCase();
+      if (v === '' || lower === 'null' || lower === 'n/a' || lower === 'unknown') {
+        v = 'not stated';
+      }
+    }
+    clean[key] = v;
+  }
+  return clean;
+}
+
+// Full pipeline for one email. Never throws — returns a result object
+// with a flags string, so Main.gs can log the failure and keep going
+// instead of one bad deck stopping the whole run.
+function extractDeal(message) {
+  const flags = [];
+  let fields = validateDeal(null);   // all 'not stated' by default
+
+  try {
+    const attachment = findDeckAttachment(message);
+    const body = message.getPlainBody();
+    let pdf = null;
+
+    if (attachment) {
+      try {
+        pdf = toPdfBlob(attachment);
+      } catch (e) {
+        // Conversion failed — a corrupt or password-locked file.
+        // Fall through to body-only rather than losing the deal.
+        flags.push('deck_unreadable');
+      }
+    } else {
+      flags.push('no_deck_body_only');
+    }
+
+    // Bail only if we have neither source.
+    if (!pdf && body.trim().length < 40) {
+      flags.push('no_content');
+      return { fields: fields, flags: flags.join('; ') };
+    }
+
+    const raw = callGemini(pdf, body);
+    fields = validateDeal(raw);
+
+    let missing = 0;
+    for (let i = 0; i < DEAL_FIELDS.length; i++) {
+      if (fields[DEAL_FIELDS[i]] === 'not stated') missing++;
+    }
+    if (missing >= 5) flags.push('sparse_extraction');
+
+  } catch (e) {
+    flags.push('extraction_failed: ' + e.message.slice(0, 120));
+  }
+
+  return { fields: fields, flags: flags.join('; ') };
+}
