@@ -1,0 +1,69 @@
+function runTests() {
+  const results = [];
+
+  function check(label, actual, expected) {
+    const pass = String(actual) === String(expected);
+    results.push((pass ? 'PASS  ' : 'FAIL  ') + label +
+                 '  got=' + actual + '  want=' + expected);
+  }
+
+  check('domain from bracketed', extractDomain('Priya <priya@acme.ai>'), 'acme.ai');
+  check('domain from bare',      extractDomain('priya@acme.ai'),          'acme.ai');
+  check('subdomain stripped',    extractDomain('a@mail.acme.com'),        'acme.com');
+  check('co.in preserved',       extractDomain('a@acme.co.in'),           'acme.co.in');
+  check('case folded',           extractDomain('A@ACME.AI'),              'acme.ai');
+  check('malformed',             extractDomain('not-an-email'),           '');
+  check('empty input',           extractDomain(''),                       '');
+
+  check('free domain flagged',   isFreeEmailDomain('gmail.com'),          'true');
+  check('company not flagged',   isFreeEmailDomain('acme.ai'),            'false');
+
+  check('name: suffix',   normalizeCompanyName('Acme Technologies'),     'acme');
+  check('name: dot ai',   normalizeCompanyName('Acme.ai'),               'acme');
+  check('name: pvt ltd',  normalizeCompanyName('Acme Labs Pvt Ltd'),     'acme');
+  check('name: two word', normalizeCompanyName('Bright Wheel'),          'brightwheel');
+  check('name: empty',    normalizeCompanyName(''),                      '');
+
+  Logger.log(results.join('\n'));
+}
+function testExtractOnDriveFile() {
+  const FILE_ID = '1l7F17uO504i7sfiVsmnqkTBOXII8iZrr';
+  const blob = DriveApp.getFileById(FILE_ID).getBlob();
+  const raw = callGemini(toPdfBlob(blob), 'test email body');
+  console.log('RAW: ' + JSON.stringify(raw, null, 2));
+  console.log('CLEAN: ' + JSON.stringify(validateDeal(raw), null, 2));
+}
+function testKeyPresent() {
+  const k = getApiKey();
+  if (!k) { console.log('STILL MISSING'); return; }
+  console.log('Key found. Length=' + k.length + ' ends with ...' + k.slice(-4));
+}
+function testSectors() {
+  console.log(JSON.stringify(getCanonicalSectors()));
+}
+function debugOwners() {
+  const tab = getTab(CONFIG.TAB_OWNERS);
+  const values = tab.getDataRange().getValues();
+  console.log('rows found: ' + values.length);
+  console.log('headers: ' + JSON.stringify(values[0]));
+  if (values.length > 1) console.log('row 2: ' + JSON.stringify(values[1]));
+  const rows = readRows(CONFIG.TAB_OWNERS);
+  console.log('parsed keys: ' + JSON.stringify(rows.length ? Object.keys(rows[0]) : 'none'));
+}
+
+function testBodyOnly() {
+  const body = [
+    'Hi Tulsi,',
+    '',
+    'I am Ananya Rao, founder of Loopwear. We make rental workwear for',
+    'hospitality staff in Bengaluru. We are at 4.2 lakh MRR across 60',
+    'hotels, growing about 30% month on month. Raising 2 Cr seed.',
+    '',
+    'No deck yet — happy to walk you through on a call.',
+    'ananya@loopwear.in'
+  ].join('\n');
+
+  // Passing null for the PDF is the whole point of the change.
+  const raw = callGemini(null, body);
+  console.log('RAW: ' + JSON.stringify(raw, null, 2));
+}
