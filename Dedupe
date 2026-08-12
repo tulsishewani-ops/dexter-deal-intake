@@ -1,0 +1,100 @@
+// Gmail gives senders as 'Priya Nair <priya@acme.ai>' or sometimes
+// just 'priya@acme.ai'. This pulls out the bit after the @.
+function extractDomain(fromField) {
+  if (!fromField) return '';
+
+  // Look for text inside angle brackets first.
+  const bracketed = fromField.match(/<([^>]+)>/);
+  const address = bracketed ? bracketed[1] : fromField;
+
+  const at = address.indexOf('@');
+  if (at === -1) return '';
+
+  return normalizeDomain(address.slice(at + 1));
+}
+
+// Two-part public suffixes. 'acme.co.in' must keep three labels,
+// while 'mail.acme.com' should collapse to two.
+const MULTI_PART_TLDS = ['co.in', 'co.uk', 'com.au', 'co.jp', 'com.br', 'co.za'];
+
+// Strips whitespace, casing, and subdomains so
+// 'Mail.Acme.com' and 'acme.com' produce the same key.
+function normalizeDomain(domain) {
+  if (!domain) return '';
+  let d = String(domain).trim().toLowerCase().replace(/\.$/, '');
+
+  const parts = d.split('.');
+  if (parts.length <= 2) return d;
+
+  const lastTwo = parts.slice(-2).join('.');
+  // If it ends in something like .co.in, keep three labels.
+  if (MULTI_PART_TLDS.indexOf(lastTwo) !== -1) {
+    return parts.slice(-3).join('.');
+  }
+  return lastTwo;
+}
+
+// True if this is a personal mailbox, not a company domain.
+function isFreeEmailDomain(domain) {
+  return CONFIG.FREE_EMAIL_DOMAINS.indexOf(domain) !== -1;
+}
+
+// Reduces a company name to a comparable core:
+//   'Acme Technologies Pvt Ltd' -> 'acme'
+//   'Acme.ai'                   -> 'acme'
+//   'ACME Labs'                 -> 'acme'
+function normalizeCompanyName(name) {
+  if (!name) return '';
+
+  // Replace anything that isn't a letter or digit with a space.
+  let s = String(name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  // Drop noise words like 'technologies', 'inc', 'ai'.
+  const words = s.split(' ').filter(function (w) {
+    return w && CONFIG.NAME_NOISE.indexOf(w) === -1;
+  });
+
+  // If stripping removed everything, fall back to the original.
+  return (words.length ? words.join('') : s.replace(/ /g, ''));
+}
+
+// THE DEDUPE DECISION.
+// Returns one of:
+//   { decision: 'DUPLICATE', reason, existing }
+//   { decision: 'REVIEW',    reason, existing }   <- name matched, domain didn't
+//   { decision: 'NEW',       reason: '' }
+function checkExisting(domain, companyName) {
+  const existingDeals = readRows(CONFIG.TAB_DEALS);
+
+  // 1. Primary key: domain. Exact match after normalization.
+  if (domain && !isFreeEmailDomain(domain)) {
+    for (let i = 0; i < existingDeals.length; i++) {
+      if (normalizeDomain(existingDeals[i].domain) === domain) {
+        return {
+          decision: 'DUPLICATE',
+          reason: 'domain match: ' + domain,
+          existing: existingDeals[i]
+        };
+      }
+    }
+  }
+
+  // 2. Secondary signal: normalized company name.
+  // Deliberately NOT auto-rejecting here. Two different companies can
+  // share a name; a false "already in CRM" loses a deal permanently,
+  // which is far more expensive than a duplicate row someone deletes.
+  const nameKey = normalizeCompanyName(companyName);
+  if (nameKey && nameKey.length >= 3) {
+    for (let i = 0; i < existingDeals.length; i++) {
+      if (normalizeCompanyName(existingDeals[i].company_name) === nameKey) {
+        return {
+          decision: 'REVIEW',
+          reason: 'name match "' + nameKey + '" but different domain',
+          existing: existingDeals[i]
+        };
+      }
+    }
+  }
+
+  return { decision: 'NEW', reason: '' };
+}
