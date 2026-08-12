@@ -1,0 +1,32 @@
+Deal Intake Automation: Writeup
+
+What works
+Every 15 minutes the script reads Gmail threads labelled deal-intake. For each one it extracts deal fields from the attached deck (or the email body, if there is no deck), checks the company against the CRM, writes a new row if it is new, generates a summary Google Doc linked from that row, assigns an owner based on sector, and posts a notification. Failures are isolated per email: one bad deck cannot stop the run and every decision is logged to a Run_Log tab.
+Dedupe: why domain, not name
+A company controls its email domain. It does not control how people type its name — "Acme", "Acme Technologies" and "Acme.ai" all arrive from @acme.ai. So the domain is the primary key, normalized for case and subdomains.
+
+Two cases break that, and both matter more than the happy path:
+
+Free mail. Keying on gmail.com would reject every second founder pitching from a personal address as a duplicate of the first — a silent failure that loses deals with no trace. Free domains are therefore excluded from the key entirely and the row is flagged for review.
+
+Name collisions. When the domain can't decide, a normalized name check runs — lowercased, with suffixes like "Technologies", "Labs" and "Pvt Ltd" stripped. But it flags rather than skips. Two different companies can share a name, and a false skip loses a deal permanently while a flagged row costs a partner ten seconds.
+
+A live example from testing: a company pitching from a Gmail address with no deck, whose name matched an existing CRM entry, produced a row flagged no_deck_body_only; free_email_domain; possible_duplicate: name match "vendra" but different domain. Three subsystems degrading independently, and a human left with everything they need to decide.
+Missing data
+Seed decks routinely omit revenue. The model is instructed to return null for anything not stated and never to infer a number: an absent revenue figure must not become "early stage" or "0". A validation layer then converts every null to "not stated" and guarantees the row shape, so a sparse deck produces an honest thin row rather than a crash or an invented figure.
+
+Tested against a real deck with no founder name stated: the row reads "not stated", not a guess. Rows missing five or more fields are flagged sparse_extraction so thin extractions are visible rather than quietly wrong.
+Sector routing
+The Sector_Owners tab is editable and is the source of truth. Rather than letting the model guess a sector and then mapping its guess, the tab's sector list is read into the prompt at request time as a closed set of options. The model chooses from Dexter's sectors or returns "Other"; adding a row to the tab expands what it can choose. Anything unmatched routes to Unassigned, because a deal waiting for a human beats a deal on the wrong partner's desk.
+What I'd harden with more time
+WhatsApp. Notifications currently post to a webhook (Google Chat/Slack). There is no clean free WhatsApp API, and I judged it a poor trade to spend extraction time on Twilio setup. It swaps into the notify() function alone: no other file knows how notifications are sent.
+
+A third dedupe key. The founder's own email address, so the same person following up from a personal account is caught. Currently, that passes as new.
+
+A review queue. Flagged rows sit inline in the CRM today. A separate tab holding them until someone confirms would scale better past a few hundred deals.
+
+Follow-up decks. The script reads the first message in a thread. A deck sent in a later reply is missed.
+
+Cost and volume logging. Per-run token spend, to make the economics visible before this runs on real inbound volume.
+One honest limitation
+Sector classification is fuzzy at the edges. A workwear rental company selling to hotels was classified Consumer; B2B is equally defensible. The system is built so this is cheap to fix rather than pretending it is solved, a partner corrects the row in seconds, and the mapping tab is theirs to edit.
