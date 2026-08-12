@@ -1,0 +1,93 @@
+// Entry point. Runs on a time trigger or manually.
+// Processes every unprocessed email in the deal-intake label.
+function processInbox() {
+  const threads = GmailApp.search(CONFIG.GMAIL_QUERY, 0, 20);
+  console.log('Threads found: ' + threads.length);
+
+  const label = getOrCreateLabel(CONFIG.LABEL_PROCESSED);
+
+  for (let i = 0; i < threads.length; i++) {
+    try {
+      processThread(threads[i]);
+    } catch (e) {
+      // One bad email must never stop the run. Log it and continue.
+      console.log('Thread failed: ' + e.message);
+      logRun('', '', 'ERROR', e.message.slice(0, 200));
+    }
+    // Label regardless of outcome, so a permanently broken email
+    // doesn't get retried forever on every run.
+    threads[i].addLabel(label);
+  }
+  console.log('Run complete.');
+}
+
+// Gmail throws if you ask for a label that doesn't exist yet.
+function getOrCreateLabel(name) {
+  return GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name);
+}
+
+// Handles one email thread end to end.
+function processThread(thread) {
+  const message = thread.getMessages()[0];   // first message = the pitch
+  const messageId = message.getId();
+  const from = message.getFrom();
+  const domain = extractDomain(from);
+
+  // Extract first — dedupe needs the company name from the deck,
+  // not just the domain, to run its secondary name check.
+  const result = extractDeal(message);
+  const fields = result.fields;
+  const flags = [];
+  if (result.flags) flags.push(result.flags);
+
+  // The sender's address is authoritative. The deck's version of the
+  // founder email is often stale or absent, so we overwrite it.
+  fields.founder_email = extractEmailAddress(from);
+
+  // Personal mailboxes can't identify a company, so flag for review.
+  if (isFreeEmailDomain(domain)) flags.push('free_email_domain');
+
+  const check = checkExisting(domain, fields.company_name);
+
+  if (check.decision === 'DUPLICATE') {
+    console.log('SKIP ' + fields.company_name + ' — ' + check.reason);
+    logRun(messageId, domain, 'DUPLICATE', check.reason);
+    return;
+  }
+
+  if (check.decision === 'REVIEW') {
+    // Not a skip. Writes the row with a flag so a human decides.
+    flags.push('possible_duplicate: ' + check.reason);
+  }
+
+  const owner = findOwner(fields.sector);
+  const docUrl = createSummaryDoc(fields, fields.founder_email, owner);
+  if (!docUrl) flags.push('doc_failed');
+
+  appendRow(CONFIG.TAB_DEALS, {
+    company_name:    fields.company_name,
+    domain:          domain,
+    founder_name:    fields.founder_name,
+    founder_email:   fields.founder_email,
+    stage:           fields.stage,
+    sector:          fields.sector,
+    revenue:         fields.revenue,
+    traction:        fields.traction,
+    ask:             fields.ask,
+    owner:           owner.name,
+    summary_doc:     docUrl,
+    source_email_id: messageId,
+    date_added:      new Date(),
+    flags:           flags.join('; ')
+  });
+
+  notify(fields, owner, docUrl);
+  console.log('ADDED ' + fields.company_name + ' → ' + owner.name);
+  logRun(messageId, domain, 'ADDED', fields.company_name);
+}
+
+// 'Priya Nair <priya@acme.ai>' -> 'priya@acme.ai'
+function extractEmailAddress(fromField) {
+  const m = String(fromField || '').match(/<([^>]+)>/);
+  return m ? m[1].trim() : String(fromField || '').trim();
+}
