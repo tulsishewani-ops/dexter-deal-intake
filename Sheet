@@ -1,0 +1,71 @@
+// Returns one tab (Google calls them "sheets") from the spreadsheet
+// this script is attached to. Throws a clear error if you typo'd a tab name.
+function getTab(tabName) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tab = ss.getSheetByName(tabName);
+  if (!tab) {
+    throw new Error('No tab named "' + tabName + '". Check spelling in CONFIG.');
+  }
+  return tab;
+}
+
+// Reads a whole tab and returns it as a list of objects keyed by header.
+// Row 1 is treated as headers. So a row becomes:
+//   { company_name: 'Acme', domain: 'acme.ai', ... }
+// This is why we never write getRange(row, 4) anywhere — if someone
+// inserts a column in the Sheet, column-number code silently breaks
+// and header-keyed code keeps working.
+function readRows(tabName) {
+  const values = getTab(tabName).getDataRange().getValues();
+  if (values.length < 2) return [];        // headers only, or empty
+
+  // Normalize headers to lowercase with underscores, so 'Owner Name',
+  // 'Owner_name' and 'owner_name' all resolve to the same key.
+  // The Sheet is edited by humans; the code shouldn't depend on their casing.
+  const headers = values[0].map(function (h) {
+    return String(h).trim().toLowerCase().replace(/\s+/g, '_');
+  });
+  const rows = [];
+
+  // Start at 1 to skip the header row.
+  for (let i = 1; i < values.length; i++) {
+    const obj = {};
+    for (let c = 0; c < headers.length; c++) {
+      obj[headers[c]] = values[i][c];
+    }
+    obj._rowNumber = i + 1;   // real sheet row, useful for updating later
+    rows.push(obj);
+  }
+  return rows;
+}
+
+// Appends one object as a new row, placing each value under its
+// matching header. Any header with no matching key is left blank.
+function appendRow(tabName, obj) {
+  const tab = getTab(tabName);
+  const rawHeaders = tab.getRange(1, 1, 1, tab.getLastColumn()).getValues()[0];
+  const headers = rawHeaders.map(function (h) {
+    return String(h).trim().toLowerCase().replace(/\s+/g, '_');
+  });
+  // .map() walks the headers and builds a matching array of values.
+  const row = headers.map(function (h) {
+    const v = obj[h];
+    // Undefined or null becomes an empty string so the row shape stays intact.
+    return (v === undefined || v === null) ? '' : v;
+  });
+
+  tab.appendRow(row);
+  return tab.getLastRow();   // row number we just wrote
+}
+
+// Writes one line to Run_Log. Called on every email, success or failure,
+// so you can always answer "what did it do with that message?"
+function logRun(messageId, domain, decision, detail) {
+  appendRow(CONFIG.TAB_LOG, {
+    timestamp:  new Date(),
+    message_id: messageId,
+    domain:     domain,
+    decision:   decision,
+    detail:     detail || ''
+  });
+}
