@@ -27,7 +27,7 @@ function runTests() {
   Logger.log(results.join('\n'));
 }
 function testExtractOnDriveFile() {
-  const FILE_ID = '1l7F17uO504i7sfiVsmnqkTBOXII8iZrr';
+  const FILE_ID = 'PASTE_A_DRIVE_FILE_ID_HERE';
   const blob = DriveApp.getFileById(FILE_ID).getBlob();
   const raw = callGemini(toPdfBlob(blob), 'test email body');
   console.log('RAW: ' + JSON.stringify(raw, null, 2));
