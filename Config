@@ -1,0 +1,47 @@
+// A "const" is a named value that never changes.
+// CONFIG is one object holding every setting, so you edit settings
+// in exactly one place instead of hunting through the code.
+const CONFIG = {
+  TAB_DEALS:  'Deals',
+  TAB_OWNERS: 'Sector_Owners',
+  TAB_LOG:    'Run_Log',
+
+  // Gmail search string. We only look at threads labelled 'deal-intake'
+  // that we have NOT already labelled 'processed'.
+  GMAIL_QUERY: 'label:deal-intake -label:processed',
+  LABEL_PROCESSED: 'processed',
+
+  // Owner used when the sector doesn't match anything in Sector_Owners.
+  FALLBACK_OWNER: 'Unassigned',
+
+  // Model name lives here so a deprecation is a one-line fix, not a
+  // hunt through Extract.gs. Swap to 'gemini-3.6-flash' if extraction
+  // quality is poor on messy decks.
+  MODEL: 'gemini-3.5-flash-lite',
+
+  // Leave blank for now. Google Chat / Slack webhook goes here later.
+  WEBHOOK_URL: '',
+
+  // Domains that belong to email providers, not companies.
+  // A founder writing from gmail.com tells us nothing about their company,
+  // so these can never be used as the dedupe key.
+  FREE_EMAIL_DOMAINS: [
+    'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.in',
+    'outlook.com', 'hotmail.com', 'live.com', 'icloud.com',
+    'proton.me', 'protonmail.com', 'rediffmail.com', 'aol.com'
+  ],
+
+  // Suffixes stripped before comparing company names.
+  // "Acme Technologies" and "Acme" should collapse to the same string.
+  NAME_NOISE: [
+    'technologies', 'technology', 'tech', 'labs', 'lab', 'inc', 'llc',
+    'ltd', 'limited', 'pvt', 'private', 'corp', 'co', 'company',
+    'ventures', 'ai', 'io', 'app', 'hq', 'global', 'india'
+  ]
+};
+
+// A "function" is a named block of code you can run.
+// This one fetches the API key you stored in Script Properties.
+function getApiKey() {
+  return PropertiesService.getScriptProperties().getProperty('LLM_API_KEY');
+}
