@@ -1,0 +1,122 @@
+// Looks up the owner for a sector. Case-insensitive, because the Sheet
+// is human-edited and 'consumer' should match 'Consumer'.
+// Returns FALLBACK_OWNER when there's no match — an unrouted deal sits
+// in the CRM for a human, which is safer than landing on the wrong desk.
+function findOwner(sector) {
+  const rows = readRows(CONFIG.TAB_OWNERS);
+  const target = String(sector || '').trim().toLowerCase();
+
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i].sector || '').trim().toLowerCase() === target) {
+      return {
+        name:  rows[i].owner_name  || CONFIG.FALLBACK_OWNER,
+        email: rows[i].owner_email || ''
+      };
+    }
+  }
+  return { name: CONFIG.FALLBACK_OWNER, email: '' };
+}
+// Creates a Google Doc summarising the deal and returns its URL.
+// Returns '' on failure — a missing Doc must not stop the CRM row
+// from being written, since the row is the thing that matters.
+function createSummaryDoc(fields, senderEmail, owner) {
+  try {
+    const title = fields.company_name + ' — deal summary';
+    const doc = DocumentApp.create(title);
+    const body = doc.getBody();
+
+    body.appendParagraph(fields.company_name)
+        .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+    body.appendParagraph(fields.one_line).setItalic(true);
+
+    body.appendParagraph('Snapshot')
+        .setHeading(DocumentApp.ParagraphHeading.HEADING2);
+
+    // A list of label/value pairs, written as a two-column table.
+    const rows = [
+      ['Stage',    fields.stage],
+      ['Sector',   fields.sector],
+      ['Revenue',  fields.revenue],
+      ['Ask',      fields.ask],
+      ['Founder',  fields.founder_name],
+      ['Contact',  senderEmail],
+      ['Owner',    owner.name]
+    ];
+    body.appendTable(rows);
+
+    body.appendParagraph('Traction')
+        .setHeading(DocumentApp.ParagraphHeading.HEADING2);
+    body.appendParagraph(fields.traction);
+
+    body.appendParagraph('Auto-generated ' + new Date().toLocaleString())
+        .setItalic(true).setFontSize(8);
+
+    // Writes buffered changes to Drive before we read the URL.
+    doc.saveAndClose();
+
+    // Anyone at the firm with the link can open it. Without this, the
+    // Doc is private to whoever's account runs the script.
+    DriveApp.getFileById(doc.getId())
+            .setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+    return doc.getUrl();
+
+  } catch (e) {
+    console.log('Doc creation failed: ' + e.message);
+    return '';
+  }
+}
+// Posts to a webhook. Google Chat and Slack both accept a JSON body
+// with a 'text' field, so this works with either.
+// Swapping to WhatsApp means changing this one function: Twilio takes
+// a different URL, form-encoded payload, and an auth header. Nothing
+// else in the codebase knows how notifications are sent.
+function notify(fields, owner, docUrl) {
+  if (!CONFIG.WEBHOOK_URL) {
+    console.log('No webhook configured — skipping notification.');
+    return false;
+  }
+
+  const lines = [
+    '*New deal: ' + fields.company_name + '*',
+    fields.one_line,
+    'Stage: ' + fields.stage + '  |  Sector: ' + fields.sector,
+    'Revenue: ' + fields.revenue + '  |  Ask: ' + fields.ask,
+    'Owner: ' + owner.name
+  ];
+  if (docUrl) lines.push(docUrl);
+
+  try {
+    const response = UrlFetchApp.fetch(CONFIG.WEBHOOK_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ text: lines.join('\n') }),
+      muteHttpExceptions: true
+    });
+    return response.getResponseCode() === 200;
+
+  } catch (e) {
+    // A failed notification never blocks intake. The row is already
+    // in the CRM; the alert is a convenience on top of it.
+    console.log('Notify failed: ' + e.message);
+    return false;
+  }
+}
+function testActions() {
+  const fields = {
+    company_name: 'Nourish',
+    one_line: 'Everyday Indian nutrition, rebuilt for modern homes.',
+    stage: 'Seed', sector: 'Consumer',
+    revenue: '18 Cr FY25 revenue', ask: '35 Cr',
+    founder_name: 'not stated',
+    traction: 'Crossed 18 Cr FY25 with 14,000+ retail doors.'
+  };
+
+  const owner = findOwner('Consumer');
+  console.log('Owner: ' + JSON.stringify(owner));
+
+  const url = createSummaryDoc(fields, 'founder@nourish.in', owner);
+  console.log('Doc: ' + (url || 'FAILED'));
+
+  console.log('Notified: ' + notify(fields, owner, url));
+}
