@@ -10,7 +10,7 @@ Built on Google Apps Script:  the CRM is a Google Sheet and the inbox is Gmail, 
 Setup
 Time required: about 10 minutes. Steps 1- 3 are required; the rest are verification.
 1. Make your own copy
-Open the shared link and choose Make a copy. This copies the Sheet and the attached Apps Script project into your Drive. Everything then runs as you, against your Gmail and your Drive no access to my account is involved.
+Open the shared link- https://docs.google.com/spreadsheets/d/1Qbt7XJaPDjVZp6EQPJTa3Y0iVdzVN2qQFuYpBZdcuz4/copy and choose Make a copy. This copies the Sheet and the attached Apps Script project into your Drive. Everything then runs as you, against your Gmail and your Drive no access to my account is involved.
 
 Open the script with Extensions → Apps Script.
 2. Add a Gemini API key
